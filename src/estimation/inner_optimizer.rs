@@ -1887,7 +1887,61 @@ fn find_ebe_solve(
         // coordinate and scans only the weakly-identified ones, so well-informed
         // subjects pay just `2·n_eta` cheap objective evaluations and their EBE
         // stays bit-identical to `inner_restarts = 0` (no seed solve runs).
-        let scan_all = subject.has_resets() || subject.has_tv_covariates();
+        let proto_env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+        let proto_debug = std::env::var("FERX_SCREEN_DEBUG").is_ok();
+        if proto_debug {
+            eprintln!("[screen] subj {} cold nll {nll:.6} eta {eta:?}", subject.id);
+        }
+        if let Some(n_draws) = proto_env("FERX_SCREEN_N") {
+            let k_top = proto_env("FERX_SCREEN_K").unwrap_or(1);
+            let pts = crate::estimation::importance_sampling::sobol_uniforms(n_eta, n_draws + 1, 0);
+            let mut scored: Vec<(f64, Vec<f64>)> = Vec::new();
+            for p in pts.iter().skip(1) {
+                let z: Vec<f64> = p
+                    .iter()
+                    .map(|&u| crate::estimation::importance_sampling::inv_normal_cdf(u))
+                    .collect();
+                let zv = DVector::from_vec(z);
+                let e = &params.omega.chol * zv;
+                let v = obj(e.as_slice());
+                if v.is_finite() {
+                    scored.push((v, e.as_slice().to_vec()));
+                }
+            }
+            scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let base_nll = nll;
+            for (rank, (v0, start)) in scored.iter().take(k_top).enumerate() {
+                let mut cand = start.clone();
+                let ok = inner_minimize_with_grad(
+                    &obj,
+                    &agrad,
+                    &mut cand,
+                    n_eta,
+                    max_iter,
+                    tol,
+                    precond.as_deref(),
+                    None,
+                    stop_precond,
+                    &stall_at,
+                    false,
+                );
+                let cand_nll = obj(&cand);
+                if proto_debug {
+                    eprintln!(
+                        "[screen] subj {} rank {rank} start {v0:.4} -> {cand_nll:.6} (base {base_nll:.6}) {cand:?}",
+                        subject.id
+                    );
+                }
+                if cand.iter().all(|v| v.is_finite()) && cand_nll + 1e-9 < nll {
+                    nll = cand_nll;
+                    eta = cand;
+                    ebe_converged = ebe_converged || ok;
+                }
+            }
+        }
+        let scan_all = subject.has_resets()
+            || subject.has_tv_covariates()
+            || std::env::var("FERX_SCAN_ALL").is_ok();
         let scan_coord: Vec<bool> = if scan_all {
             vec![true; n_eta]
         } else {
@@ -1905,8 +1959,13 @@ fn find_ebe_solve(
             for m in 1..=restarts {
                 let step = (m as f64 + 1.0) * sd;
                 for &k in &[-step, step] {
-                    let mut cand = base.clone();
+                    let mut cand = if std::env::var("FERX_ORIGIN_AXES").is_ok() {
+                        vec![0.0; n_eta]
+                    } else {
+                        base.clone()
+                    };
                     cand[i] = k;
+                    let seed_nll = obj(&cand);
                     let ok = inner_minimize_with_grad(
                         &obj,
                         &agrad,
@@ -1922,6 +1981,13 @@ fn find_ebe_solve(
                     );
                     if cand.iter().all(|v| v.is_finite()) {
                         let cand_nll = obj(&cand);
+                        if proto_debug {
+                            eprintln!(
+                                "[axis] subj {} i {i} k {k:.3} seed {seed_nll:.4} -> {cand_nll:.6} (best {nll:.6}) win {}",
+                                subject.id,
+                                cand_nll + 1e-9 < nll
+                            );
+                        }
                         if cand_nll + 1e-9 < nll {
                             nll = cand_nll;
                             eta = cand;

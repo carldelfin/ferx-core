@@ -52,7 +52,7 @@ const TWO_PI: f64 = std::f64::consts::TAU;
 /// [`crate::stats::special::normal_inv_cdf`]. Because the clamped u is always in
 /// (0,1), that function's `p<=0`/`p>=1` ±inf guards never fire, so the output is
 /// bit-identical to the prior inline copy for every input this wrapper receives.
-fn inv_normal_cdf(u: f64) -> f64 {
+pub(crate) fn inv_normal_cdf(u: f64) -> f64 {
     crate::stats::special::normal_inv_cdf(u.clamp(1e-15, 1.0 - 1e-15))
 }
 
@@ -64,7 +64,7 @@ fn inv_normal_cdf(u: f64) -> f64 {
 /// a `dim > d` call equal a `d`-dimensional call bit for bit. That is what lets
 /// [`sobol_qmc_draws`] append the Student-t and mixture coordinates without
 /// moving the normal-proposal draws.
-fn sobol_uniforms(dim: usize, k_samples: usize, seed: u64) -> Vec<Vec<f64>> {
+pub(crate) fn sobol_uniforms(dim: usize, k_samples: usize, seed: u64) -> Vec<Vec<f64>> {
     use sobol::Sobol;
 
     let mut rng = StdRng::seed_from_u64(seed.wrapping_add(0x534F_424F_4C00_0000u64));
