@@ -567,6 +567,31 @@ single-pass engine. Two consequences
 If a comparison has to be exact, put both sides on the same engine, or tighten
 `ode_reltol` / `ode_abstol` until the gap is below what you are measuring.
 
+### An explicit stepper can inflate the FOCEI determinant unseen {#explicit-unstable-tangents}
+
+`rk45` and `vern7` choose their step from the **predictions**. A fast decaying mode that no
+prediction contains but that the analytic Jacobian's η-sensitivities do (say a pool that
+only an η-perturbation fills) can then be stepped past the method's stability limit without
+the error estimate noticing: the predictions stay clean, the sensitivities blow up, and the
+determinant term of the FOCEI objective is inflated. The reproduction in
+[#2846](https://github.com/FeRx-NLME/ferx-core/issues/2846) reports an OFV of 1522.81 where
+the same model under `rodas5p` reports 434.2019.
+
+ferx does not change the integration to prevent this (no tangent-aware step control was
+found that costs nothing on the fits that do not need it). Instead, after a fit that used
+an explicit method (`rk45`, `vern7`, or `auto`) with the analytic gradient, it rebuilds each
+subject's Jacobian from central differences of the predictions, which never see the
+sensitivities, re-scores the objective at the reported estimates, and warns with
+`W_ODE_EXPLICIT_UNSTABLE_TANGENTS` when a subject moves by 1.0 OFV unit or more. The check
+only reads the fit's results; it changes no estimate, OFV or step.
+
+On the bundled ODE examples and `nonmem_anchor` fits the same comparison moves a subject by
+at most 2.5e-3 (the finite-difference Jacobian's own truncation), so the threshold is far
+from anything benign; on the #2846 reproduction the worst subject moves by 90.
+
+If you see the warning, treat the reported OFV and the covariance step as suspect, set
+`ode_method = rodas5p`, or tighten `ode_reltol` (1e-10 corrects the reproduction), and refit.
+
 ### A right-hand side that reads model time is always integrated {#non-autonomous-rhs}
 
 For some models ferx skips integration entirely. A static multi-route absorption model with a

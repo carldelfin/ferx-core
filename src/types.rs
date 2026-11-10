@@ -7959,6 +7959,12 @@ pub fn classify_warning(raw: &str) -> WarningEntry {
         // because the Jacobian's tighter solve could not finish. Its own token, ahead of the
         // prose arms: the message says "finite-difference" and "objective".
         (WarningSeverity::Warning, WarningCode::OdeSolver)
+    } else if lower.contains("w_ode_explicit_unstable_tangents") {
+        // #2846: the objective moves when the analytic `H` is replaced by the finite-difference
+        // one, because an explicit stepper stepped past a stability limit only the η-tangents
+        // see. Its own token, ahead of the prose arms: the message says "objective" and
+        // "finite differences".
+        (WarningSeverity::Warning, WarningCode::OdeSolver)
     } else if lower.contains("w_nonfinite_objective") {
         // #1303: the convergence verdict was demoted because the objective at
         // the final estimates is `NaN`, infinite, or the clamped divergence

@@ -3991,6 +3991,171 @@ pub(crate) fn fd_h_not_tightened_warning(
     Some((msg, entry))
 }
 
+/// The token of [`explicit_h_check_warning`]; `classify_warning` matches it.
+const EXPLICIT_H_TOKEN: &str = "W_ODE_EXPLICIT_UNSTABLE_TANGENTS";
+
+/// The per-subject objective difference (OFV units) at or above which [`explicit_h_check`]
+/// reports. Measured on macOS over every bundled ODE example and `nonmem_anchor` fit that has a
+/// dataset (154 fits under pinned `rk45`, pinned `vern7` and the default `auto`): the largest
+/// benign per-subject difference was 2.5e-3 and the largest total 4.6e-2 — the finite-difference
+/// Jacobian's own truncation — and 3.3e-2 per subject on a stress pass that fed the same models
+/// a mismatched dataset. The #2846 repro's worst subject moves by 90. 1.0 sits 30 times above
+/// the largest benign value seen and 90 below the defect.
+pub(crate) const EXPLICIT_H_OFV_TOLERANCE: f64 = 1.0;
+
+/// What [`explicit_h_check`] measured: how far the objective moves when the analytic
+/// Jacobian is swapped for the finite-difference one at the reported EBEs.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ExplicitHCheck {
+    /// Subjects compared.
+    pub(crate) checked: usize,
+    /// Subjects whose `|OFV_i difference|` is at least [`EXPLICIT_H_OFV_TOLERANCE`].
+    pub(crate) exceeding: usize,
+    /// `Σ (OFV_i with the finite-difference H − OFV_i the fit reported)`.
+    pub(crate) delta_ofv: f64,
+    /// The subject with the largest `|OFV_i difference|`, and that difference.
+    pub(crate) worst_id: String,
+    pub(crate) worst_delta: f64,
+}
+
+/// Whether a fit's ODE stepper can be an explicit one (`rk45`, `vern7`, or `auto`, which
+/// starts explicit and may stay so).
+fn explicit_stepper_possible(model: &CompiledModel) -> bool {
+    use crate::ode::solver::OdeMethod;
+    matches!(
+        solver_reporting_options(model).ode_method,
+        OdeMethod::Rk45 | OdeMethod::Vern7 | OdeMethod::Auto
+    )
+}
+
+/// Re-score every subject's marginal at the reported EBEs with `H` taken from central
+/// differences of the predictions instead of from the analytic Jacobian the fit used, and
+/// report how far the objective moves (#2846).
+///
+/// An explicit stepper's error estimate reads values only, so it can step past its own
+/// stability limit on a fast mode that the predictions never excite but the η-tangents do. The
+/// predictions stay clean; the analytic `H` does not, and the FOCEI determinant term inflates.
+/// A finite-difference `H` is built from values alone, so it is the independent reference.
+///
+/// Reads the fit's results and changes nothing. `None` unless the fit ran the analytic ODE
+/// adjoint with a possibly-explicit stepper, is not a mixture, and at least one non-IOV subject
+/// was compared.
+pub(crate) fn explicit_h_check(
+    model: &CompiledModel,
+    population: &Population,
+    params: &ModelParameters,
+    eta_hats: &[DVector<f64>],
+    subjects: &[SubjectResult],
+    interaction: bool,
+    mixture: bool,
+) -> Option<ExplicitHCheck> {
+    if mixture
+        || !integrates_odes(model)
+        || !explicit_stepper_possible(model)
+        || !crate::sens::ode_provider::adjoint::recorder_in_scope(model)
+        || crate::estimation::inner_optimizer::inner_analytic_opted_out(model)
+        || eta_hats.len() != population.subjects.len()
+        || subjects.len() != population.subjects.len()
+    {
+        return None;
+    }
+    let deltas: Vec<Option<f64>> = population
+        .subjects
+        .par_iter()
+        .enumerate()
+        .map(|(i, subject)| {
+            let eta = &eta_hats[i];
+            let h_fd = crate::estimation::inner_optimizer::fd_h_for_check(
+                model,
+                subject,
+                params,
+                eta.as_slice(),
+            )?;
+            let nll_fd = foce_subject_nll_cov(
+                model,
+                subject,
+                &params.theta,
+                eta,
+                &h_fd,
+                &params.omega,
+                &params.sigma.values,
+                model.residual_cov_at(params),
+                interaction,
+            );
+            let reported = subjects[i].ofv_contribution;
+            if !crate::stats::likelihood::is_usable_subject_nll(nll_fd)
+                || !crate::stats::likelihood::is_usable_subject_nll(reported / 2.0)
+            {
+                return None;
+            }
+            Some(2.0 * nll_fd - reported)
+        })
+        .collect();
+    explicit_h_summary(&population.subjects, &deltas)
+}
+
+/// Fold the per-subject differences into an [`ExplicitHCheck`]; `None` entries (a subject the
+/// reference could not score) are skipped, and `None` is returned when none was scored.
+pub(crate) fn explicit_h_summary(
+    subjects: &[Subject],
+    deltas: &[Option<f64>],
+) -> Option<ExplicitHCheck> {
+    let mut checked = 0;
+    let mut exceeding = 0;
+    let mut total = 0.0;
+    let mut worst: Option<(usize, f64)> = None;
+    for (i, d) in deltas.iter().enumerate() {
+        let Some(d) = *d else { continue };
+        checked += 1;
+        total += d;
+        if d.abs() >= EXPLICIT_H_OFV_TOLERANCE {
+            exceeding += 1;
+        }
+        if worst.map_or(true, |(_, w)| d.abs() > w.abs()) {
+            worst = Some((i, d));
+        }
+    }
+    let (wi, wd) = worst?;
+    Some(ExplicitHCheck {
+        checked,
+        exceeding,
+        delta_ofv: total,
+        worst_id: subjects[wi].id.clone(),
+        worst_delta: wd,
+    })
+}
+
+/// The warning for a fit whose objective moves by [`EXPLICIT_H_OFV_TOLERANCE`] or more per
+/// subject when its analytic Jacobian is replaced by the finite-difference one, or `None` when
+/// no subject does (#2846). It detects; it does not change the fit's result.
+pub(crate) fn explicit_h_check_warning(check: &ExplicitHCheck) -> Option<(String, WarningEntry)> {
+    if check.exceeding == 0 {
+        return None;
+    }
+    let msg = format!(
+        "{EXPLICIT_H_TOKEN}: the objective of {} of {} subjects moves by {EXPLICIT_H_OFV_TOLERANCE} \
+         or more when the Jacobian of the predictions is rebuilt from finite differences at the \
+         final estimates; subject {} moves by {:+.4}, and all subjects by {:+.4} together. An \
+         explicit ode_method (rk45, vern7, or auto where it stayed explicit) sets its step from \
+         the predictions alone, so it can step past the stability limit of a fast mode that only \
+         the eta-sensitivities excite: the predictions stay clean while the analytic Jacobian, \
+         and with it the determinant term of the FOCEI objective, is inflated. Treat the \
+         reported OFV as suspect, set ode_method = rodas5p or tighten ode_reltol, and refit \
+         (#2846).",
+        check.exceeding, check.checked, check.worst_id, check.worst_delta, check.delta_ofv,
+    );
+    let details = serde_json::json!({
+        "subjects_checked": check.checked,
+        "subjects_exceeding": check.exceeding,
+        "tolerance": EXPLICIT_H_OFV_TOLERANCE,
+        "total_delta_ofv": check.delta_ofv,
+        "worst_subject": check.worst_id,
+        "worst_delta_ofv": check.worst_delta,
+    });
+    let entry = warning_entry(WarningCode::OdeSolver, msg.clone(), Some(details));
+    Some((msg, entry))
+}
+
 /// The one place a non-`fit()` entry point decides whether to open a
 /// [`crate::ode::solver::SolverStatsScope`] (#1304).
 ///

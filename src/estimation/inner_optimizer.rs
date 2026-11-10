@@ -3564,6 +3564,29 @@ pub(crate) fn ebe_h_matrices_at(
         .collect()
 }
 
+/// One non-IOV subject's `H` at `eta` by central differences of the values, the route the
+/// analytic Jacobian is checked against (#2846). `None` for an IOV subject. Reads only values, so
+/// it never sees a mode that only the η-tangents excite.
+pub(crate) fn fd_h_for_check(
+    model: &CompiledModel,
+    subject: &Subject,
+    params: &ModelParameters,
+    eta: &[f64],
+) -> Option<DMatrix<f64>> {
+    if iov_h_route(model, subject) {
+        return None;
+    }
+    let schedule = cacheable_schedule(model, subject);
+    Some(compute_jacobian_fd(
+        model,
+        subject,
+        &params.theta,
+        eta,
+        &mut pk::EventPkParams::default(),
+        schedule.as_ref(),
+    ))
+}
+
 /// Whether `subject`'s `H` is the IOV one: the same branch `find_ebe_impl` takes.
 fn iov_h_route(model: &CompiledModel, subject: &Subject) -> bool {
     model.n_kappa > 0 && !subject.occasions.is_empty()

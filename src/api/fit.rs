@@ -2609,6 +2609,16 @@ fn fit_inner(
         .auto_stiff_rejected_jets;
     }
 
+    let h_check = super::postfit::explicit_h_check(
+        model,
+        population,
+        &result.params,
+        &result.eta_hats,
+        &subjects,
+        options.interaction,
+        result.mixture_posteriors.is_some(),
+    );
+
     // Mixture (#977 Phase 5): thread the converged per-subject posteriors onto
     // each SubjectResult so output.rs can emit the PMIX_1..PMIX_K and MIXEST
     // columns. MIXEST is stored 1-based to match the NONMEM `MIXEST` convention.
@@ -3143,6 +3153,15 @@ fn fit_inner(
         options,
         SolverStatsPhase::PostfitPredictions,
     ) {
+        warnings.push(msg);
+        native_warnings.push(entry);
+    }
+    // An explicit stepper that stepped past the stability limit of a mode only the
+    // η-tangents excite leaves clean predictions and an inflated analytic `H` (#2846).
+    if let Some((msg, entry)) = h_check
+        .as_ref()
+        .and_then(super::postfit::explicit_h_check_warning)
+    {
         warnings.push(msg);
         native_warnings.push(entry);
     }

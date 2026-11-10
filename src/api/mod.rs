@@ -415,6 +415,10 @@ mod tests_param_corr;
 mod ode_solver_diagnostics_tests;
 
 #[cfg(test)]
+#[path = "tests/explicit_h_check_tests.rs"]
+mod explicit_h_check_tests;
+
+#[cfg(test)]
 #[path = "tests/non_fit_diagnostics_tests.rs"]
 mod non_fit_diagnostics_tests;
 
