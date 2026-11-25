@@ -4087,6 +4087,7 @@ pub fn parse_full_model_with(
     // A deprecated block (`[initial_values]`) is a warning, not an error (#2913):
     // taken out here so it seeds `parse_warnings` when the model is built.
     let deprecated_block_warnings = std::mem::take(&mut extracted.warnings);
+    apply_zero_fix_etas(&mut extracted, level_bindings)?;
     // `ode_template NAME(...)` desugaring (#322 Phase 0b): if [structural_model]
     // uses `ode_template`, rewrite it (and the [odes]/[scaling] blocks) into the
     // hand-written `ode(...)` form *before* anything else looks at the blocks, so
@@ -18442,6 +18443,50 @@ pub(crate) fn mixing_logp_grad(
         }
     }
     out
+}
+
+/// PROTOTYPE (#3150, design A2): an `omega NAME ~ 0 FIX` η is held at 0, so it is taken out of Ω and
+/// its name reads as the literal `0` in every other block. Skipped when `NAME` is mentioned anywhere
+/// else in `[parameters]` (a block, a per-class override) or named by `iiv_on_ruv`.
+fn apply_zero_fix_etas(
+    extracted: &mut ExtractedBlocks, level_bindings: &LevelBindings,
+) -> Result<(), String> {
+    let Some(lines) = extracted.unnamed.get("parameters") else { return Ok(()) };
+    let (_, omegas, ..) = parse_parameters(lines, level_bindings)?;
+    let word = |n: &str| regex::Regex::new(&format!(r"\b{}\b", regex::escape(n))).unwrap();
+    let ruv =
+        |n: &str| regex::Regex::new(&format!(r"iiv_on_ruv\s*=\s*{}\b", regex::escape(n))).unwrap();
+    let zero: Vec<String> = omegas
+        .into_iter()
+        .filter(|o| o.fixed && o.variance == 0.0)
+        .map(|o| o.name)
+        .filter(|n| {
+            let w = word(n);
+            lines.iter().filter(|l| w.is_match(l)).count() == 1
+                && !extracted.unnamed.values().flatten().any(|l| ruv(n).is_match(l))
+        })
+        .collect();
+    if zero.is_empty() {
+        return Ok(());
+    }
+    let alt = zero.iter().map(|n| regex::escape(n)).collect::<Vec<_>>().join("|");
+    let decl = regex::Regex::new(&format!(r"(?i)^\s*omega\s+({alt})\s*~")).unwrap();
+    let uses = regex::Regex::new(&format!(r"\b({alt})\b")).unwrap();
+    for (ty, lines) in extracted.unnamed.iter_mut() {
+        if ty == "parameters" {
+            lines.retain(|l| !decl.is_match(l));
+        } else {
+            for l in lines.iter_mut() {
+                *l = uses.replace_all(l, "0").into_owned();
+            }
+        }
+    }
+    for lines in extracted.named.values_mut().flat_map(|m| m.values_mut()) {
+        for l in lines.iter_mut() {
+            *l = uses.replace_all(l, "0").into_owned();
+        }
+    }
+    Ok(())
 }
 
 fn parse_parameters(
