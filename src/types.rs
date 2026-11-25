@@ -2579,12 +2579,25 @@ impl OmegaMatrix {
             None => {
                 // Taken from `m`, before the regularisation below touches it (#1605).
                 let sim_chol = structural_zero_factor(&m);
-                let eig = m.clone().symmetric_eigen();
-                let min_eig = eig.eigenvalues.min();
-                let reg = if min_eig < 0.0 { -min_eig + 1e-8 } else { 1e-8 };
-                let m_reg = &m + DMatrix::identity(n, n) * reg;
-                let c = m_reg.clone().cholesky().expect("Regularized matrix must be PD");
-                (m_reg, c.l(), c.inverse(), sim_chol)
+                // PROTOTYPE (#3150, design B): floor only the structural-zero diagonals.
+                let zeros: Vec<usize> = (0..n)
+                    .filter(|&i| (0..n).all(|j| m[(i, j)] == 0.0 && m[(j, i)] == 0.0))
+                    .collect();
+                let mut only_zero = m.clone();
+                for &i in &zeros {
+                    only_zero[(i, i)] = 1e-8;
+                }
+                if let Some(c) = (!zeros.is_empty()).then(|| only_zero.clone().cholesky()).flatten()
+                {
+                    (only_zero, c.l(), c.inverse(), sim_chol)
+                } else {
+                    let eig = m.clone().symmetric_eigen();
+                    let min_eig = eig.eigenvalues.min();
+                    let reg = if min_eig < 0.0 { -min_eig + 1e-8 } else { 1e-8 };
+                    let m_reg = &m + DMatrix::identity(n, n) * reg;
+                    let c = m_reg.clone().cholesky().expect("Regularized matrix must be PD");
+                    (m_reg, c.l(), c.inverse(), sim_chol)
+                }
             }
         };
         // log|Ω| = 2·Σᵢ log(L_ii). Negative or zero diagonals shouldn't
